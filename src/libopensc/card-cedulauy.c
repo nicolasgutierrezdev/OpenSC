@@ -44,6 +44,20 @@
  * is accepted.  Once PACE has installed secure messaging the contact
  * command flow above runs unchanged over the SM channel.
  *
+ * GET RESPONSE under that channel is served by iso_sm_get_response(), which
+ * iso_sm_start() installs and sc_get_response() dispatches ahead of
+ * card->ops->get_response.  It sends the command with SC_APDU_FLAGS_NO_SM:
+ * per ISO 7816-4 GET RESPONSE is transport-level and is never SM-protected,
+ * since it returns the remainder of a response protected as a whole.  This
+ * only matters on a reader without extended-APDU support, where the roughly
+ * 290-byte protected response to PSO: COMPUTE DIGITAL SIGNATURE cannot arrive
+ * in one short APDU; every other command is kept below CEDULAUY_SM_MAX_SIZE so
+ * that it never needs chaining at all.  That path assumes a 61xx status never
+ * comes out of the *decrypted* response, where an SM-wrapped GET RESPONSE
+ * would be the correct answer.  The one command on this card that replies
+ * 61xx in the clear, PSO: HASH, is sent with SC_APDU_FLAGS_NO_GET_RESP for
+ * that reason.
+ *
  * The card conventions come from the public documentation and reference code
  * published by AGESIC, Uruguay's national e-government agency ("Documentación
  * técnica de la cédula de identidad con chip" and
@@ -520,68 +534,6 @@ cedulauy_perform_pace(struct sc_card *card)
 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
-/*
- * GET RESPONSE override.
- *
- * sc_get_response() builds GET RESPONSE as a fresh APDU that does not inherit
- * SC_APDU_FLAGS_NO_SM from the SM-wrapped APDU whose response it is fetching.
- * With secure messaging active that command would itself be wrapped
- * ("0C C0 00 00 ..."), which the card rejects: per ISO 7816-4 GET RESPONSE is a
- * transport-level command and is never SM-protected, since it returns the
- * remainder of a response that is already protected as a whole.
- *
- * This only matters on a reader without extended-APDU support where the roughly 290-byte protected
- * response to PSO: COMPUTE DIGITAL SIGNATURE cannot arrive in one short APDU.
- * Every other command is kept below CEDULAUY_SM_MAX_SIZE so that it never
- * needs chaining at all.
- *
- * The override therefore assumes that a 61xx status never comes out of the
- * *decrypted* response, where an SM-wrapped GET RESPONSE would be the correct
- * answer.  The one command on this card that replies 61xx in the clear,
- * PSO: HASH, is sent with SC_APDU_FLAGS_NO_GET_RESP for that reason.
- */
-static int
-cedulauy_get_response(struct sc_card *card, size_t *count, u8 *buf)
-{
-	struct sc_apdu apdu = {0};
-	size_t rlen;
-	int r;
-
-	if (card->sm_ctx.sm_mode != SM_MODE_TRANSMIT)
-		return iso_ops->get_response(card, count, buf);
-
-	if (*count > sc_get_max_recv_size(card))
-		rlen = sc_get_max_recv_size(card);
-	else
-		rlen = *count;
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_2, 0xC0, 0x00, 0x00);
-	apdu.le = rlen;
-	apdu.resplen = rlen;
-	apdu.resp = buf;
-	
-	apdu.flags |= SC_APDU_FLAGS_NO_GET_RESP | SC_APDU_FLAGS_NO_SM;
-
-	r = sc_transmit_apdu(card, &apdu);
-	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
-
-	*count = apdu.resplen;
-
-	if (apdu.resplen == 0)
-		LOG_FUNC_RETURN(card->ctx, sc_check_sw(card, apdu.sw1, apdu.sw2));
-
-	if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00)
-		r = 0; /* no more data to read */
-	else if (apdu.sw1 == 0x61)
-		r = apdu.sw2 == 0 ? 256 : apdu.sw2; /* more data to read */
-	else if (apdu.sw1 == 0x62 && apdu.sw2 == 0x82)
-		r = 0; /* Le not reached but file/record ended */
-	else
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-
-	return r;
-}
-
 #endif /* CEDULAUY_HAS_PACE */
 
 static int
@@ -797,7 +749,7 @@ cedulauy_compute_signature(struct sc_card *card, const u8 *data, size_t datalen,
 	 * interface; without a response buffer the SM layer would size the
 	 * reply from resplen == 0 and truncate it.  The body itself is of no
 	 * interest.  SC_APDU_FLAGS_NO_GET_RESP keeps a 61xx status from
-	 * reaching cedulauy_get_response(), which cannot serve one. */
+	 * reaching iso_sm_get_response(), which cannot serve one. */
 	sbuf[offs++] = 0x90;
 	sbuf[offs++] = (unsigned char)datalen;
 	memcpy(sbuf + offs, data, datalen);
@@ -876,9 +828,6 @@ sc_get_cedulauy_driver(void)
 	cedulauy_ops.get_challenge = cedulauy_get_challenge;
 	cedulauy_ops.logout = cedulauy_logout;
 	cedulauy_ops.card_reader_lock_obtained = cedulauy_card_reader_lock_obtained;
-#ifdef CEDULAUY_HAS_PACE
-	cedulauy_ops.get_response = cedulauy_get_response;
-#endif
 
 	return &cedulauy_drv;
 }
