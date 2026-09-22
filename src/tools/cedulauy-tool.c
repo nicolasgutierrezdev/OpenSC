@@ -58,36 +58,11 @@ static const char *option_help[] = {
 #define CEDULAUY_MRZ_PATH "3F007000700B"
 
 static int
-read_mrz_file(sc_card_t *card, unsigned char *mrz)
-{
-	unsigned char buf[3 + CEDULAUY_MRZ_LEN];
-	sc_path_t path;
-	int r;
-
-	sc_format_path(CEDULAUY_MRZ_PATH, &path);
-	r = sc_select_file(card, &path, NULL);
-	if (r < 0)
-		return r;
-
-	r = sc_read_binary(card, 0, buf, sizeof buf, NULL);
-	if (r < 0)
-		return r;
-
-	if (r < (int)sizeof buf || buf[0] != 0x7F || buf[1] != 0x01 || buf[2] != CEDULAUY_MRZ_LEN) {
-		r = SC_ERROR_INVALID_DATA;
-	} else {
-		memcpy(mrz, buf + 3, CEDULAUY_MRZ_LEN);
-		r = SC_SUCCESS;
-	}
-	sc_mem_clear(buf, sizeof buf);
-
-	return r;
-}
-
-static int
 read_mrz(sc_context_t *ctx, const char *reader, int wait, unsigned char *mrz)
 {
 	sc_card_t *card = NULL;
+	unsigned char buf[3 + CEDULAUY_MRZ_LEN];
+	sc_path_t path;
 	int r;
 
 	if (util_connect_card(ctx, &card, reader, wait)) {
@@ -96,12 +71,22 @@ read_mrz(sc_context_t *ctx, const char *reader, int wait, unsigned char *mrz)
 	}
 
 	if (card->type != SC_CARD_TYPE_CEDULAUY) {
-		fprintf(stderr, "The card is not a cedula in a contact reader\n");
+		fprintf(stderr, "The card is not a cedulauy in a contact reader\n");
 		r = SC_ERROR_NOT_SUPPORTED;
 	} else {
-		r = read_mrz_file(card, mrz);
-		if (r < 0)
+		sc_format_path(CEDULAUY_MRZ_PATH, &path);
+		r = sc_select_file(card, &path, NULL);
+		if (r >= 0)
+			r = sc_read_binary(card, 0, buf, sizeof buf, NULL);
+		if (r >= 0 && (r < (int)sizeof buf || buf[0] != 0x7F || buf[1] != 0x01 || buf[2] != CEDULAUY_MRZ_LEN))
+			r = SC_ERROR_INVALID_DATA;
+		if (r < 0) {
 			fprintf(stderr, "Cannot read the MRZ from the card: %s\n", sc_strerror(r));
+		} else {
+			memcpy(mrz, buf + 3, CEDULAUY_MRZ_LEN);
+			r = SC_SUCCESS;
+		}
+		sc_mem_clear(buf, sizeof buf);
 	}
 
 	sc_unlock(card);
@@ -109,7 +94,6 @@ read_mrz(sc_context_t *ctx, const char *reader, int wait, unsigned char *mrz)
 	return r;
 }
 
-/* appends the characters of in to the MRZ, ignoring whitespace */
 static int
 append_mrz(const char *in, unsigned char *mrz, size_t *len)
 {
@@ -215,33 +199,31 @@ main(int argc, char *argv[])
 		} else {
 			printf("MRZ removed.\n");
 		}
-		goto out;
-	}
-
-	if (opt_read) {
-		r = read_mrz(ctx, opt_reader, opt_wait, mrz);
-		if (r == SC_SUCCESS)
-			mrz_len = CEDULAUY_MRZ_LEN;
-	} else if (opt_mrz != NULL) {
-		r = append_mrz(opt_mrz, mrz, &mrz_len);
 	} else {
-		r = prompt_mrz(mrz, &mrz_len);
+		if (opt_read) {
+			r = read_mrz(ctx, opt_reader, opt_wait, mrz);
+			if (r == SC_SUCCESS)
+				mrz_len = CEDULAUY_MRZ_LEN;
+		} else if (opt_mrz != NULL) {
+			r = append_mrz(opt_mrz, mrz, &mrz_len);
+		} else {
+			r = prompt_mrz(mrz, &mrz_len);
+		}
+
+		if ((r == SC_SUCCESS && mrz_len != CEDULAUY_MRZ_LEN) || r == SC_ERROR_WRONG_LENGTH) {
+			fprintf(stderr, "The MRZ has to be %d characters long\n", CEDULAUY_MRZ_LEN);
+			r = SC_ERROR_WRONG_LENGTH;
+		}
+
+		if (r == SC_SUCCESS) {
+			r = cedulauy_write_mrz_cache(ctx, mrz);
+			if (r < 0)
+				fprintf(stderr, "Cannot store the MRZ: %s\n", sc_strerror(r));
+			else
+				printf("MRZ stored, the card can now be used over the contactless interface.\n");
+		}
 	}
 
-	if ((r == SC_SUCCESS && mrz_len != CEDULAUY_MRZ_LEN) || r == SC_ERROR_WRONG_LENGTH) {
-		fprintf(stderr, "The MRZ has to be %d characters long\n", CEDULAUY_MRZ_LEN);
-		r = SC_ERROR_WRONG_LENGTH;
-	}
-
-	if (r == SC_SUCCESS) {
-		r = cedulauy_write_mrz_cache(ctx, mrz);
-		if (r < 0)
-			fprintf(stderr, "Cannot store the MRZ: %s\n", sc_strerror(r));
-		else
-			printf("MRZ stored, the card can now be used over the contactless interface.\n");
-	}
-
-out:
 	sc_mem_clear(mrz, sizeof mrz);
 	sc_release_context(ctx);
 	return r == SC_SUCCESS ? 0 : 1;
