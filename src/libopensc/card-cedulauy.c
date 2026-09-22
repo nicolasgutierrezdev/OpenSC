@@ -554,6 +554,7 @@ cedulauy_get_challenge(struct sc_card *card, u8 *rnd, size_t len)
 	LOG_FUNC_RETURN(card->ctx, r);
 }
 
+static int
 cedulauy_logout(struct sc_card *card)
 {
 	/* re-selecting the application resets its security status */
