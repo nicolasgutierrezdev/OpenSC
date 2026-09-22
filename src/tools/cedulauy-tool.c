@@ -26,9 +26,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "libopensc/opensc.h"
 #include "libopensc/cards.h"
 #include "libopensc/card-cedulauy-cache.h"
-#include "libopensc/opensc.h"
 #include "util.h"
 
 static const char *app_name = "cedulauy-tool";
