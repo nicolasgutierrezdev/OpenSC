@@ -46,13 +46,7 @@ cedulauy_mrz_cache_path(sc_context_t *ctx, char *buf, size_t buflen)
 	if (r < 0)
 		return r;
 
-#ifdef _WIN32
-	strlcat(buf, "\\", buflen);
-#else
-	strlcat(buf, "/", buflen);
-#endif
-
-	if (strlcat(buf, CEDULAUY_MRZ_CACHE_FILE, buflen) >= buflen)
+	if (strlcat(buf, "/" CEDULAUY_MRZ_CACHE_FILE, buflen) >= buflen)
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	return SC_SUCCESS;
@@ -86,7 +80,7 @@ cedulauy_create_mrz_cache(sc_context_t *ctx, const char *path)
 
 /* returns 1 if a complete MRZ was read, 0 otherwise */
 static inline int
-cedulauy_read_mrz_cache(sc_context_t *ctx, unsigned char *mrz)
+cedulauy_read_mrz_cache(sc_context_t *ctx, unsigned char mrz[CEDULAUY_MRZ_LEN])
 {
 	char path[PATH_MAX];
 	FILE *f;
@@ -102,15 +96,23 @@ cedulauy_read_mrz_cache(sc_context_t *ctx, unsigned char *mrz)
 	got = fread(mrz, 1, CEDULAUY_MRZ_LEN, f);
 	fclose(f);
 
-	return got == CEDULAUY_MRZ_LEN;
+	if (got != CEDULAUY_MRZ_LEN) {
+		sc_log(ctx, "Ignoring %s, it is not %d characters long", path, CEDULAUY_MRZ_LEN);
+		return 0;
+	}
+
+	return 1;
 }
 
 static inline int
-cedulauy_write_mrz_cache(sc_context_t *ctx, const unsigned char *mrz)
+cedulauy_write_mrz_cache(sc_context_t *ctx, const unsigned char mrz[CEDULAUY_MRZ_LEN])
 {
 	char path[PATH_MAX];
 	FILE *f;
+	size_t written;
 	int r;
+
+	LOG_FUNC_CALLED(ctx);
 
 	r = cedulauy_mrz_cache_path(ctx, path, sizeof path);
 	LOG_TEST_RET(ctx, r, "Cannot determine the cache directory");
@@ -126,12 +128,8 @@ cedulauy_write_mrz_cache(sc_context_t *ctx, const unsigned char *mrz)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
 	}
 
-	if (fwrite(mrz, 1, CEDULAUY_MRZ_LEN, f) != CEDULAUY_MRZ_LEN) {
-		fclose(f);
-		sc_log(ctx, "Cannot write %s", path);
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
-	}
-	if (fclose(f) != 0) {
+	written = fwrite(mrz, 1, CEDULAUY_MRZ_LEN, f);
+	if (fclose(f) != 0 || written != CEDULAUY_MRZ_LEN) {
 		sc_log(ctx, "Cannot write %s: %s", path, strerror(errno));
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
 	}
@@ -146,12 +144,15 @@ cedulauy_delete_mrz_cache(sc_context_t *ctx)
 	char path[PATH_MAX];
 	int r;
 
+	LOG_FUNC_CALLED(ctx);
+
 	r = cedulauy_mrz_cache_path(ctx, path, sizeof path);
 	LOG_TEST_RET(ctx, r, "Cannot determine the cache directory");
 
 	if (remove(path) != 0) {
-		sc_log(ctx, "Cannot remove %s: %s", path, strerror(errno));
-		LOG_FUNC_RETURN(ctx, errno == ENOENT ? SC_ERROR_FILE_NOT_FOUND : SC_ERROR_INTERNAL);
+		int err = errno;
+		sc_log(ctx, "Cannot remove %s: %s", path, strerror(err));
+		LOG_FUNC_RETURN(ctx, err == ENOENT ? SC_ERROR_FILE_NOT_FOUND : SC_ERROR_INTERNAL);
 	}
 
 	sc_log(ctx, "MRZ removed from %s", path);
