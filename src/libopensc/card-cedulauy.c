@@ -18,47 +18,31 @@
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  *
- * The card is a Gemalto/Thales IAS/ECC platform.  AGESIC issues it in
- * two applet versions: "IAS Classic v4" (2015 chip, contact only) and
- * "IAS Classic v5" (2022 chip, MultiApp V5.0, a dual-interface card with
- * a contactless/NFC side).  Both are supported here over the contact
- * interface, where the subset they expose is plain ISO 7816, so the
- * driver is built on the generic iso7816 operations.  The IAS application
- * must be selected by AID before anything on the card is accessible.
+ * The card is a Gemalto/Thales IAS/ECC platform issued by AGESIC in two applet
+ * versions: "IAS Classic v4" (2015 chip, contact only) and "IAS Classic v5"
+ * (2022 chip, MultiApp V5.0, dual interface).  Both are supported over the
+ * contact interface, v5 also over the contactless one.  The commands used are
+ * plain ISO 7816, so the driver is built on the iso7816 operations.  The IAS
+ * application must be selected by AID before anything on the card is accessible.
  *
- * The driver does not tell the two versions apart over the contact
- * interface: the ATR is matched with the applet-version and batch bytes
- * masked out, so one table entry covers every batch.  The way to
- * distinguish them is the applet label read with GET DATA (tag 7F30,
- * object C0): the ASCII string is either "IAS Classic v4" or
- * "IAS Classic v5".  This is documented by AGESIC and does not depend on
- * the ATR.  Only the v5 card answers on the contactless interface at all,
- * so anything reached over NFC is a v5 by construction.
+ * The contact ATR is matched with the applet-version and batch bytes masked out,
+ * so the driver does not tell v4 from v5; the applet label (GET DATA 7F30,
+ * object C0) does.
  *
- * Everything above, and every card convention this driver relies on over the
- * contact interface (AID, file layout, algorithm references, PIN reference),
- * comes from the public documentation and reference code published by AGESIC,
- * Uruguay's national e-government agency: "Documentación técnica de la
- * cédula de identidad con chip" and https://github.com/eIDuy/apdu-services .
+ * The contact-interface conventions (AID, file layout, algorithm and PIN
+ * references) come from AGESIC's public documentation, "Documentación técnica
+ * de la cédula de identidad con chip", and https://github.com/eIDuy/apdu-services .
  *
- * The contactless interface is not covered by any of that: AGESIC publishes no
- * APDU-level documentation for it.  Everything in the paragraph below was
- * determined by observation against a v5 card.  It describes the batches that
- * were available for testing, not behaviour guaranteed by the issuer, and a
- * future batch may differ.
- *
- * Observed contactless behaviour.  The interface is a PACE-protected ICAO/eID
- * interface.  Its EF.CardAccess announces a single PACEInfo,
- * id-PACE-ECDH-GM-AES-CBC-CMAC-256 over NIST P-384, and no ChipAuthentication
- * or TerminalAuthentication info, so plain PACE is sufficient and no EAC
- * (TA/CA) is involved.  The MRZ is the only PACE password the card was seen to
- * accept: MSE:Set AT with the CAN reference (83 01 02) is rejected with 6A88,
- * the MRZ reference (83 01 01) is accepted.  The ATR is not stable across
- * activations, see cedulauy_atrs below.  Once PACE has installed secure
- * messaging the contact command flow above runs unchanged over the SM channel.
- * Nothing that identifies the cedula is readable before PACE, so the contactless
- * interface is only matched once PACE with the MRZ, stored with cedulauy-tool or
- * given in CEDULAUY_MRZ, and selecting the eID application have succeeded.
+ * AGESIC publishes no APDU-level documentation for the contactless interface.
+ * What follows was observed on the v5 batches available for testing, and future
+ * batches may differ.  EF.CardAccess announces a single PACEInfo,
+ * id-PACE-ECDH-GM-AES-CBC-CMAC-256 over NIST P-384, and no CA/TA info, so plain
+ * PACE is enough.  Only the MRZ is accepted as PACE password (MSE:Set AT with the
+ * CAN reference, 83 01 02, fails with 6A88).  The ATR changes on every activation
+ * and nothing that identifies the cédula is readable before PACE, so the card is
+ * only matched once PACE with the MRZ (cached by cedulauy-tool or given in
+ * CEDULAUY_MRZ) and selecting the eID application have succeeded.  Over the
+ * resulting SM channel the same commands as over contact are used.
  */
 
 #include "libopensc/errors.h"
@@ -67,16 +51,15 @@
 #endif
 
 #include <assert.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "internal.h"
-#include "libopensc/card-cedulauy-cache.h"
 
 #if defined(ENABLE_SM) && defined(ENABLE_OPENPACE)
 #define CEDULAUY_HAS_PACE 1
 
+#include "libopensc/card-cedulauy-cache.h"
 #include "libopensc/pace.h"
 #include "sm/sm-eac.h"
 #endif
@@ -88,19 +71,6 @@
 
 #define CEDULAUY_ALGO_RSA_PKCS1	       (CEDULAUY_ALGO_HASH_NONE | CEDULAUY_ALGO_PAD_PKCS1)
 #define CEDULAUY_ALGO_RSA_PKCS1_SHA256 (CEDULAUY_ALGO_HASH_SHA256 | CEDULAUY_ALGO_PAD_PKCS1)
-
-#define CEDULAUY_SM_MAC_LEN   8
-#define CEDULAUY_SM_BLOCK_LEN 16
-/* 87 81 <len> 01 <cryptogram>, 99 02 <SW>, 8E 08 <MAC>, SW */
-#define CEDULAUY_SM_OVERHEAD ((1 + 2 + 1) + 4 + (2 + CEDULAUY_SM_MAC_LEN) + 2)
-#define CEDULAUY_SM_WRAPPED(plainlen) \
-	(CEDULAUY_SM_OVERHEAD + \
-			(((plainlen) + 1) / CEDULAUY_SM_BLOCK_LEN + 1) * CEDULAUY_SM_BLOCK_LEN)
-
-#define CEDULAUY_SM_MAX_SIZE 0xC0
-
-static_assert(CEDULAUY_SM_WRAPPED(CEDULAUY_SM_MAX_SIZE) <= SC_MAX_APDU_RESP_SIZE,
-		"the protected form of a CEDULAUY_SM_MAX_SIZE response has to fit into a short APDU response");
 
 // clang-format off
 static const struct sc_atr_table cedulauy_atrs[] = {
@@ -119,6 +89,19 @@ static const unsigned char cedulauy_aid[] = {
 		0xA0, 0x00, 0x00, 0x00, 0x18, 0x40, 0x00, 0x00, 0x01, 0x63, 0x42, 0x00};
 
 #ifdef CEDULAUY_HAS_PACE
+
+#define CEDULAUY_SM_MAC_LEN   8
+#define CEDULAUY_SM_BLOCK_LEN 16
+/* 87 81 <len> 01 <cryptogram>, 99 02 <SW>, 8E 08 <MAC>, SW */
+#define CEDULAUY_SM_OVERHEAD ((1 + 2 + 1) + 4 + (2 + CEDULAUY_SM_MAC_LEN) + 2)
+#define CEDULAUY_SM_WRAPPED(plainlen) \
+	(CEDULAUY_SM_OVERHEAD + \
+	(((plainlen) + 1) / CEDULAUY_SM_BLOCK_LEN + 1) * CEDULAUY_SM_BLOCK_LEN)
+
+#define CEDULAUY_SM_MAX_SIZE 0xC0
+
+static_assert(CEDULAUY_SM_WRAPPED(CEDULAUY_SM_MAX_SIZE) <= SC_MAX_APDU_RESP_SIZE,
+		"the protected form of a CEDULAUY_SM_MAX_SIZE response has to fit into a short APDU response");
 
 /* id-PACE-ECDH-GM-AES-CBC-CMAC-256 over NIST P-384 */
 static const unsigned char cedulauy_ef_cardaccess[] = {
@@ -443,7 +426,7 @@ cedulauy_select_file(struct sc_card *card, const struct sc_path *in_path,
 	LOG_FUNC_CALLED(card->ctx);
 
 	if (path.aid.len == sizeof cedulauy_aid && 0 == memcmp(path.aid.value, cedulauy_aid, sizeof cedulauy_aid)) {
-		/* the AID is always selected in init() */
+		/* the driver keeps the eID application selected, no need to select it again */
 		path.aid.len = 0;
 	}
 	if (path.type == SC_PATH_TYPE_PATH && path.len >= 2 && path.value[0] == 0x3F && path.value[1] == 0x00) {
@@ -502,7 +485,7 @@ cedulauy_compute_signature(struct sc_card *card, const u8 *data, size_t datalen,
 	if (data == NULL || out == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-#ifdef ENABLE_SM
+#ifdef CEDULAUY_HAS_PACE
 	under_sm = card->sm_ctx.sm_mode == SM_MODE_TRANSMIT;
 #endif
 
